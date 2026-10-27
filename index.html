@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin panel</title>
+<style>
+:root{--bg:#eef1f4;--card:#fff;--ink:#17202a;--mut:#5f6b78;--acc:#0f766e;--bad:#b42318;--line:#d5dbe1}
+@media(prefers-color-scheme:dark){:root{--bg:#10161c;--card:#18212a;--ink:#e6ebf0;--mut:#93a0ad;--acc:#2dd4bf;--bad:#f97066;--line:#2b3744}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+[hidden]{display:none!important}
+main{max-width:640px;margin:0 auto;padding:14px}
+h2{margin:0;font-size:1.25rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin:0 0 10px}
+.mut{color:var(--mut);font-size:.85rem;word-break:break-all}
+.big{font-size:1.4rem;font-weight:700;margin:6px 0}
+input,textarea{width:100%;padding:11px;margin:0 0 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);font:inherit}
+button{padding:10px 14px;border:0;border-radius:8px;background:var(--acc);color:var(--bg);font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+header{display:flex;justify-content:space-between;align-items:center;margin:4px 0 12px}
+nav{display:flex;gap:8px;margin-bottom:12px}
+nav button{flex:1;background:transparent;color:var(--ink);border:1px solid var(--line)}
+nav button.on{background:var(--acc);color:var(--bg);border-color:var(--acc)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.tag{font-size:.75rem;padding:2px 8px;border-radius:99px;background:var(--bad);color:#fff;margin-left:6px}
+.toast{position:fixed;left:12px;right:12px;bottom:14px;max-width:616px;margin:0 auto;background:var(--ink);color:var(--bg);padding:12px 14px;border-radius:8px;z-index:9}
+</style>
+</head>
+<body>
+<main>
+<div id="msg" class="toast" hidden></div>
+
+<section id="setup" class="view card" hidden>
+  <h2>First-time setup</h2>
+  <p class="mut">Paste your Firebase web config, the block that starts with “const firebaseConfig”. It is saved only in this browser.</p>
+  <textarea id="cfg" rows="8"></textarea>
+  <button id="saveCfg">Save config</button>
+</section>
+
+<section id="login" class="view card" hidden>
+  <h2>Admin login</h2>
+  <p class="mut">Use the email and password you created in Firebase Authentication.</p>
+  <input id="email" type="email" placeholder="Email" autocomplete="username">
+  <input id="pass" type="password" placeholder="Password" autocomplete="current-password">
+  <div class="row"><button id="loginBtn">Log in</button><button id="resetCfg" class="ghost">Change Firebase project</button></div>
+</section>
+
+<section id="app" class="view" hidden>
+  <header><h2>Admin panel</h2><button id="logout" class="ghost">Log out</button></header>
+  <nav>
+    <button data-tab="users">Users</button>
+    <button data-tab="redeem">Redeem</button>
+    <button data-tab="log">Coin log</button>
+  </nav>
+  <input id="search" placeholder="Search by name or user id">
+  <div id="list"></div>
+</section>
+</main>
+
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getAuth,signInWithEmailAndPassword,signOut,onAuthStateChanged} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {getFirestore,collection,doc,getDoc,getDocs,query,orderBy,limit,where,runTransaction,updateDoc,serverTimestamp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let auth, db, me, tab = "users", users = [];
+
+function show(id){ document.querySelectorAll(".view").forEach(v => v.hidden = v.id !== id); }
+function msg(t){ const m = $("#msg"); m.textContent = t; m.hidden = !t; if(t) setTimeout(() => m.hidden = true, 4500); }
+
+function boot(){
+  const raw = localStorage.getItem("fbcfg");
+  if(!raw){ show("setup"); return; }
+  const app = initializeApp(JSON.parse(raw));
+  auth = getAuth(app); db = getFirestore(app);
+  onAuthStateChanged(auth, async u => {
+    if(!u){ show("login"); return; }
+    try{
+      const a = await getDoc(doc(db, "admins", u.uid));
+      if(!a.exists()){ msg("This account is not an admin."); await signOut(auth); return; }
+    }catch(e){ msg("Admin check failed: " + e.message); await signOut(auth); return; }
+    me = u; show("app"); load();
+  });
+}
+
+$("#saveCfg").onclick = () => {
+  const cfg = {};
+  for(const m of $("#cfg").value.matchAll(/(\w+)\s*:\s*"([^"]*)"/g)) cfg[m[1]] = m[2];
+  if(!cfg.apiKey || !cfg.projectId){ msg("Config not recognised. Paste the whole block."); return; }
+  localStorage.setItem("fbcfg", JSON.stringify(cfg)); location.reload();
+};
+$("#resetCfg").onclick = () => { localStorage.removeItem("fbcfg"); location.reload(); };
+$("#loginBtn").onclick = async () => {
+  try{ await signInWithEmailAndPassword(auth, $("#email").value.trim(), $("#pass").value); }
+  catch(e){ msg("Login failed. Check email and password."); }
+};
+$("#logout").onclick = () => signOut(auth);
+document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { tab = b.dataset.tab; load(); });
+$("#search").oninput = () => { if(tab === "users") drawUsers(); };
+
+async function load(){
+  document.querySelectorAll("[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  $("#search").hidden = tab !== "users";
+  $("#list").textContent = "Loading…";
+  try{
+    if(tab === "users"){
+      const s = await getDocs(query(collection(db, "users"), limit(300)));
+      users = s.docs.map(d => ({id: d.id, ...d.data()}));
+      drawUsers();
+    } else if(tab === "redeem") await drawRedeem();
+    else await drawLog();
+  }catch(e){ $("#list").textContent = "Error: " + e.message; }
+}
+
+function drawUsers(){
+  const q = $("#search").value.toLowerCase();
+  const rows = users.filter(u => (u.name || "").toLowerCase().includes(q) || u.id.toLowerCase().includes(q));
+  $("#list").innerHTML = rows.map(u => `<div class="card">
+    <b>${esc(u.name || "(no name)")}</b>${u.banned ? '<span class="tag">banned</span>' : ""}
+    <div class="mut">${esc(u.id)}</div>
+    <div class="big">${Number(u.coins || 0)} coins</div>
+    <div class="row">
+      <button data-a="add" data-id="${esc(u.id)}">Add coins</button>
+      <button data-a="sub" data-id="${esc(u.id)}" class="ghost">Remove coins</button>
+      <button data-a="ban" data-id="${esc(u.id)}" class="ghost">${u.banned ? "Unban" : "Ban"}</button>
+    </div></div>`).join("") || "No users found.";
+}
+
+async function drawRedeem(){
+  const s = await getDocs(query(collection(db, "redeemRequests"), where("status", "==", "pending"), limit(100)));
+  const rows = s.docs.map(d => ({id: d.id, ...d.data()}));
+  $("#list").innerHTML = rows.map(r => `<div class="card">
+    <b>${Number(r.coins)} coins</b> for ${esc(r.method || "voucher")}
+    <div class="mut">user ${esc(r.uid)}</div>
+    <div class="row">
+      <button data-a="ok" data-id="${esc(r.id)}">Approve</button>
+      <button data-a="no" data-id="${esc(r.id)}" class="ghost">Reject and refund</button>
+    </div></div>`).join("") || "No pending requests.";
+}
+
+async function drawLog(){
+  const s = await getDocs(query(collection(db, "coinLog"), orderBy("at", "desc"), limit(100)));
+  $("#list").innerHTML = s.docs.map(d => { const l = d.data(); return `<div class="card">
+    <b>${l.delta > 0 ? "+" : ""}${Number(l.delta)}</b> ${esc(l.reason)}
+    <div class="mut">user ${esc(l.uid)}, by ${esc(l.by)}, ${l.at ? l.at.toDate().toLocaleString() : ""}</div></div>`; }).join("") || "No coin changes yet.";
+}
+
+$("#list").onclick = async e => {
+  const b = e.target.closest("button[data-a]"); if(!b) return;
+  const id = b.dataset.id, a = b.dataset.a;
+  try{
+    if(a === "add" || a === "sub"){
+      const n = parseInt(prompt("How many coins?"), 10); if(!(n > 0)) return;
+      const why = prompt("Reason (required)"); if(!why) return;
+      await change(id, a === "add" ? n : -n, why);
+    } else if(a === "ban"){
+      const u = users.find(x => x.id === id);
+      if(!confirm((u.banned ? "Unban " : "Ban ") + (u.name || id) + "?")) return;
+      await updateDoc(doc(db, "users", id), {banned: !u.banned});
+    } else { await decide(id, a); }
+    msg("Done"); load();
+  }catch(err){ msg("Error: " + err.message); }
+};
+
+async function change(uid, delta, reason){
+  await runTransaction(db, async tx => {
+    const ref = doc(db, "users", uid), s = await tx.get(ref);
+    if(!s.exists()) throw new Error("User not found");
+    const c = (s.data().coins || 0) + delta;
+    if(c < 0) throw new Error("Balance cannot go below 0");
+    tx.update(ref, {coins: c});
+    tx.set(doc(collection(db, "coinLog")), {uid, delta, reason, by: me.email, at: serverTimestamp()});
+  });
+}
+
+async function decide(reqId, a){
+  if(!confirm(a === "ok" ? "Approve this request?" : "Reject and refund the coins?")) return;
+  await runTransaction(db, async tx => {
+    const rr = doc(db, "redeemRequests", reqId), r = await tx.get(rr);
+    if(!r.exists() || r.data().status !== "pending") throw new Error("Already handled");
+    const d = r.data(); let uref, us;
+    if(a === "no"){ uref = doc(db, "users", d.uid); us = await tx.get(uref); if(!us.exists()) throw new Error("User not found"); }
+    tx.update(rr, {status: a === "ok" ? "approved" : "rejected", by: me.email, decidedAt: serverTimestamp()});
+    if(a === "no"){
+      tx.update(uref, {coins: (us.data().coins || 0) + d.coins});
+      tx.set(doc(collection(db, "coinLog")), {uid: d.uid, delta: d.coins, reason: "Redeem rejected, refund", by: me.email, at: serverTimestamp()});
+    }
+  });
+}
+
+boot();
+</script>
+</body>
+</html>
